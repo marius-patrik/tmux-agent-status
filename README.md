@@ -3,8 +3,6 @@
 Compact tmux/psmux statusline segment that shows which AI coding agents are
 running and how much subscription quota is left in the current window.
 
-![statusline example](docs/statusline.png)
-
 ## What it shows
 
 ```
