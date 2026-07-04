@@ -31,9 +31,20 @@ def _home_dir() -> Path:
 HOME_DIR = _home_dir()
 STATUS_SCRIPT = SCRIPT_DIR / "ai-status.py"
 LOCK_FILE = SCRIPT_DIR / "daemon.lock"
+LOG_FILE = SCRIPT_DIR / "daemon.log"
+
+
+def _log(msg: str):
+    """Append a timestamped line to the daemon log."""
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
 
 # Full path to the tmux/psmux binary. Set PSMUX_BIN if it is not on PATH.
-PSMUX_BIN = Path(os.environ.get("PSMUX_BIN", "psmux"))
+_PSMUX_BIN_STR = (os.environ.get("PSMUX_BIN") or "psmux").strip().strip("'\"")
+PSMUX_BIN = Path(_PSMUX_BIN_STR)
 PSMUX_SOCKET = os.environ.get("PSMUX_SOCKET")
 
 INTERVAL = 15  # seconds
@@ -75,8 +86,10 @@ def _psmux_server_alive() -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        _log(f"server check rc={result.returncode} cmd={' '.join(cmd)}")
         return result.returncode == 0
-    except Exception:
+    except Exception as e:
+        _log(f"server check exception: {e}")
         pass
     return False
 
@@ -94,10 +107,13 @@ def _get_status() -> str:
 def _update_status():
     try:
         status = _get_status()
+        _log(f"status fetched: {status[:80]}...")
     except subprocess.TimeoutExpired:
         status = "AI timeout"
+        _log("status fetch timed out")
     except Exception as e:
-        status = f"AI err"
+        status = "AI err"
+        _log(f"status fetch error: {e}")
 
     # Match the Tokyo Night clock/date suffix from the theme.
     suffix = (
@@ -112,7 +128,8 @@ def _update_status():
     if PSMUX_SOCKET:
         cmd.extend(["-S", PSMUX_SOCKET])
     cmd.extend(["set", "-g", "status-right", status_right])
-    subprocess.run(
+    _log(f"setting status-right cmd={' '.join(cmd)}")
+    result = subprocess.run(
         cmd,
         cwd=str(HOME_DIR),
         timeout=30,
@@ -120,10 +137,13 @@ def _update_status():
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    _log(f"set status-right rc={result.returncode}")
 
 
 def main():
+    _log(f"main start pid={os.getpid()} PSMUX_BIN={PSMUX_BIN} PSMUX_SOCKET={PSMUX_SOCKET}")
     if _running():
+        _log("already running, exiting")
         print("ai-status-daemon already running")
         return
 
@@ -131,6 +151,7 @@ def main():
     atexit.register(_clear_lock)
 
     def _shutdown(signum, frame):
+        _log(f"shutdown signal {signum}")
         _clear_lock()
         sys.exit(0)
 
@@ -142,6 +163,7 @@ def main():
 
     while True:
         if not _psmux_server_alive():
+            _log("server not alive, exiting loop")
             break
         _update_status()
         time.sleep(INTERVAL)

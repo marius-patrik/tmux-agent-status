@@ -1,6 +1,7 @@
 # Runtime artifacts
 cache/
 daemon.lock
+daemon.log
 __pycache__/
 *.pyc
 *.pyo
