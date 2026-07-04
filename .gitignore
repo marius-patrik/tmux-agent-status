@@ -1,0 +1,17 @@
+# Runtime artifacts
+cache/
+daemon.lock
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Editor/OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
