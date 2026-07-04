@@ -271,11 +271,16 @@ def _tui_capture(
     wait_cmd: int = 5,
     env_overrides: dict | None = None,
     login_prompts: list[tuple[str, list[str]]] | None = None,
+    via_shell: bool = False,
 ) -> str:
     """Start a CLI in a detached psmux session, send a slash command, and return pane output.
 
     Optionally handles simple login prompts before sending the slash command.
     Each login prompt is a tuple of (substring_to_detect, keys_to_send).
+
+    When via_shell is True, the session starts with the default shell and the
+    CLI command is typed as keys. This is required for CLIs (e.g. Claude Code)
+    that need a full shell context to detect an existing OAuth/session login.
     """
     import random
 
@@ -299,7 +304,7 @@ def _tui_capture(
 
     def capture() -> str:
         return subprocess.run(
-            ["psmux", "capture-pane", "-t", f"{session}:{command}", "-p", "-S", "-80", "-E", "80"],
+            _psmux_bin() + ["capture-pane", "-t", f"{session}:{command}", "-p", "-S", "-80", "-E", "80"],
             env=env,
             capture_output=True,
             text=True,
@@ -307,39 +312,64 @@ def _tui_capture(
             errors="replace",
         ).stdout
 
+    def send_keys(*keys: str):
+        psmux("send-keys", "-t", f"{session}:{command}", *keys)
+
+    def handle_prompts(prompts: list[tuple[str, list[str]]]) -> str:
+        out = capture()
+        for prompt, keys in prompts:
+            if prompt in out:
+                for key in keys:
+                    send_keys(key)
+                time.sleep(2)
+                out = capture()
+        return out
+
     out = ""
     try:
-        psmux(
-            "new-session",
-            "-d",
-            "-s",
-            session,
-            "-n",
-            command,
-            "-x",
-            "300",
-            "-y",
-            "50",
-            command,
-            check=True,
-            timeout=10,
-        )
-        time.sleep(wait_start)
+        if via_shell:
+            # Start a shell session, then type the CLI command. This preserves
+            # the shell environment that some CLIs need to detect stored auth.
+            psmux(
+                "new-session",
+                "-d",
+                "-s",
+                session,
+                "-n",
+                command,
+                "-x",
+                "300",
+                "-y",
+                "50",
+                check=True,
+                timeout=10,
+            )
+            time.sleep(1)
+            send_keys(command, "Enter")
+            time.sleep(wait_start)
+        else:
+            psmux(
+                "new-session",
+                "-d",
+                "-s",
+                session,
+                "-n",
+                command,
+                "-x",
+                "300",
+                "-y",
+                "50",
+                command,
+                check=True,
+                timeout=10,
+            )
+            time.sleep(wait_start)
 
-        # Handle optional login prompts before sending the slash command.
+        # Handle optional login/setup prompts before sending the slash command.
         if login_prompts:
-            out = capture()
-            for prompt, keys in login_prompts:
-                if prompt in out:
-                    for key in keys:
-                        if key == "Enter":
-                            psmux("send-keys", "-t", f"{session}:{command}", "Enter")
-                        else:
-                            psmux("send-keys", "-t", f"{session}:{command}", key)
-                    time.sleep(2)
-                    out = capture()
+            handle_prompts(login_prompts)
 
-        psmux("send-keys", "-t", f"{session}:{command}", slash, "Enter")
+        send_keys(slash, "Enter")
         time.sleep(wait_cmd)
         out = capture()
     except Exception:
@@ -523,41 +553,40 @@ def _fetch_claude_quota_api() -> dict | None:
 def _fetch_claude_quota_tui() -> dict | None:
     """Fetch Claude quota by driving the TUI's /usage screen.
 
-    This is a best-effort fallback. Claude Code may prompt for login/OAuth
-    in a fresh session, in which case we abort and rely on the cached value
-    until the API succeeds again.
+    Launched via the default shell so Claude Code detects the stored OAuth
+    session the same way an interactive login does.
     """
-    token = _read_token(HOME_DIR / ".claude" / ".credentials.json", "claudeAiOauth", "accessToken")
-    env = os.environ.copy()
-    if token:
-        # If the OAuth token is usable as an API key, this lets the TUI skip
-        # the browser login flow. Fall back to prompting otherwise.
-        env["ANTHROPIC_API_KEY"] = token
-
     out = _tui_capture(
         "claude",
         "/usage",
         wait_start=8,
         wait_cmd=5,
-        env_overrides=env,
+        via_shell=True,
         login_prompts=[
-            ("Detected a custom API key", ["1", "Enter"]),
-            ("Select login method", ["1", "Enter"]),
+            ("Press Enter to continue", ["Enter"]),
+            ("Quick safety check", ["1", "Enter"]),
         ],
     )
 
-    # Claude /usage output typically shows:
-    #   Five Hour Window: 12% used  -> 88% remaining
-    #   Seven Day Window: 34% used  -> 66% remaining
-    m = re.search(
-        r"(?:Five Hour|5h).*?(\d{1,3})%\s+used.*?Seven Day.*?(\d{1,3})%\s+used",
+    # Claude /usage shows blocks like:
+    #   Current session
+    #   ████████████████ 100% used
+    #   Current week (all models)
+    #   ████████████▌ 61% used
+    session_m = re.search(
+        r"Current session.*?(\d{1,3})%\s*used",
         out,
         re.S | re.I,
     )
-    if m:
+    week_m = re.search(
+        r"Current week \(all models\).*?(\d{1,3})%\s*used",
+        out,
+        re.S | re.I,
+    )
+    if session_m or week_m:
         return {
-            "five_hour_left": _to_left(int(m.group(1))),
-            "weekly_left": _to_left(int(m.group(2))),
+            "five_hour_left": _to_left(int(session_m.group(1))) if session_m else None,
+            "weekly_left": _to_left(int(week_m.group(1))) if week_m else None,
         }
     return None
 

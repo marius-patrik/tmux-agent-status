@@ -31,9 +31,9 @@ Codex ○ 88%/44% | Claude ○ 0%/39% | Kimi ● 12%/71% | Agy ○ G 100%/94% E 
 APIs are tried first; if they fail or are unavailable, the script drives the
 CLI's own TUI in a detached tmux/psmux session and parses the output.
 
-> **Note on Claude:** the TUI fallback attempts to reuse the stored OAuth token,
-> but Claude Code may still prompt for a browser login in a fresh session. If the
-> API is rate-limited, the last cached value is kept until the API recovers.
+> **Note on Claude:** the TUI fallback launches Claude Code through the default
+> shell so it detects the stored OAuth session, the same way an interactive
+> `claude` launch does.
 
 ## Requirements
 
