@@ -1,0 +1,141 @@
+name: DarkFactory Plan
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'PRD.md'
+      - '**/PRD.md'
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: Target repository in owner/name form. Defaults to this repository.
+        required: false
+        type: string
+      ref:
+        description: Optional target repository ref. Defaults to the target repository default branch.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  df-plan:
+    name: Reconcile PRD backlog
+    runs-on: ubuntu-latest
+    # PRD-edit triggers run in every managed repo using the repository token.
+    # Scheduled and manual cross-repo sweeps need the DarkFactory app secrets
+    # and therefore run only in the control repository.
+    if: >-
+      ${{
+        github.event_name == 'push' ||
+        (github.event_name == 'schedule' && github.repository == 'marius-patrik/agent-darkfactory') ||
+        (github.event_name == 'workflow_dispatch' && github.repository == 'marius-patrik/agent-darkfactory')
+      }}
+
+    steps:
+      - name: Validate trusted control ref
+        shell: bash
+        run: |
+          # Privileged planning uses installation or repository tokens, so it only
+          # runs from a trusted default branch in an allowed owner.
+          if [[ "${GITHUB_REPOSITORY_OWNER}" != "marius-patrik" ]]; then
+            echo "::error::DarkFactory privileged planning can only run in the marius-patrik owner."
+            exit 1
+          fi
+
+          # Scheduled and push events reliably set GITHUB_REF to refs/heads/<branch>.
+          # GITHUB_REF_TYPE/NAME are not always present for scheduled runs, so the
+          # immutable ref is the trusted gate before any token is minted.
+          if [[ "${GITHUB_REF:-}" != "refs/heads/main" ]]; then
+            echo "::error::DarkFactory privileged planning can only run from refs/heads/main."
+            exit 1
+          fi
+
+          if [[ "${GITHUB_REF_TYPE:-}" == "branch" && "${GITHUB_REF_NAME:-}" != "main" ]]; then
+            echo "::error::DarkFactory privileged planning branch mismatch."
+            exit 1
+          fi
+
+      - name: Validate manual planning target ref
+        if: github.event_name == 'workflow_dispatch' && inputs.ref
+        shell: bash
+        run: |
+          # Manual planning can only target protected/default branch refs so a
+          # non-canonical tag or PRD snapshot cannot drive issue creation/closure.
+          ref="${{ inputs.ref }}"
+          if [[ "${ref}" != "main" && "${ref}" != "dev" ]]; then
+            echo "::error::DarkFactory manual planning can only target refs/heads/main or refs/heads/dev."
+            exit 1
+          fi
+
+      - name: Validate manual planning target repository
+        if: github.event_name == 'workflow_dispatch' && inputs.repo
+        shell: bash
+        run: |
+          repo="${{ inputs.repo }}"
+          case "${repo}" in
+            marius-patrik/fabrica|marius-patrik/skyblock-agent|marius-patrik/singularity|marius-patrik/life-support)
+              echo "::error::DarkFactory manual planning target is parked: ${repo}."
+              exit 1
+              ;;
+            marius-patrik/*)
+              ;;
+            *)
+              echo "::error::DarkFactory manual planning target must be a marius-patrik repository."
+              exit 1
+              ;;
+          esac
+
+      # PRD-edit triggers in managed repos run from that repository's installed,
+      # version-enforced payload. Scheduled and manual cross-repo sweeps run from
+      # the control repository at the exact SHA that triggered the workflow.
+      - name: Resolve DarkFactory script path
+        id: script-path
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            echo "path=.github/scripts/df-plan.mjs" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=darkfactory-control/.github/scripts/df-plan.mjs" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout DarkFactory control scripts
+        if: github.event_name != 'push'
+        uses: actions/checkout@v4
+        with:
+          repository: marius-patrik/agent-darkfactory
+          ref: ${{ github.sha }}
+          path: darkfactory-control
+          persist-credentials: false
+
+      # The cross-repo planning sweep runs from the control repository and needs
+      # an installation token. PRD-edit triggers run inside the target repository
+      # and use the per-repository GITHUB_TOKEN so managed repos do not need the
+      # DarkFactory app secrets to reconcile their own issues.
+      - name: Mint mp-agents installation token
+        id: app-token
+        if: github.event_name != 'push'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.DARK_FACTORY_APP_ID }}
+          private-key: ${{ secrets.DARK_FACTORY_PRIVATE_KEY }}
+          owner: marius-patrik
+          permission-contents: read
+          permission-issues: write
+
+      - name: Run planner
+        env:
+          DARK_FACTORY_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          DF_CONTROL_REPO: marius-patrik/agent-darkfactory
+          DF_TARGET_REPO: ${{ github.event_name == 'workflow_dispatch' && inputs.repo || github.repository }}
+          DF_TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || (github.event_name == 'push' && github.sha || '') }}
+          DF_PLAN_ALL: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
+          DF_TRIGGER: ${{ github.event_name }}
+          DF_DATA_REPO: marius-patrik/darkfactory-data
+        run: node ${{ steps.script-path.outputs.path }}

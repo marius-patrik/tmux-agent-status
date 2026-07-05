@@ -1,0 +1,21 @@
+name: DarkFactory Bootstrap
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  managed-setup:
+    name: Managed setup
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify managed setup
+        run: node .github/scripts/dark-factory-release-check.mjs --mode managed
