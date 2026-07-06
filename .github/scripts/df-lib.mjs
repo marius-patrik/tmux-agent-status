@@ -1,4 +1,5 @@
 import { readFile, rm } from "node:fs/promises";
+import path from "node:path";
 
 export const API_ROOT = "https://api.github.com";
 export const DEFAULT_DATA_REPO = "marius-patrik/darkfactory-data";
@@ -8,12 +9,15 @@ export const PARKED_REPOS = new Set([
   "marius-patrik/singularity",
   "marius-patrik/life-support"
 ]);
+export const MANAGED_REPOS_PATH = ".darkfactory/managed-repos.json";
+export const MANAGED_REPO_STATES = new Set(["active", "parked", "archived", "completed", "removed"]);
 
 export const WORK_LABELS = [
   { name: "df:ready", color: "0E8A16", description: "DarkFactory work loop may pick up this issue" },
   { name: "df:running", color: "1D76DB", description: "DarkFactory worker is running for this issue" },
   { name: "df:blocked", color: "B60205", description: "DarkFactory worker is blocked on this issue" },
   { name: "df:done", color: "5319E7", description: "DarkFactory worker completed this issue" },
+  { name: "df:ask-owner", color: "B60205", description: "DarkFactory needs owner input before continuing" },
   { name: "df:class:mechanical", color: "C5DEF5", description: "DarkFactory mechanical task; use low reasoning effort" },
   { name: "df:class:standard", color: "BFDADC", description: "DarkFactory standard task; use medium reasoning effort" },
   { name: "df:class:hard", color: "D4C5F9", description: "DarkFactory hard task; use high reasoning effort" }
@@ -27,7 +31,12 @@ export const PLANNING_LABELS = [
   { name: "df:prd-drift", color: "B60205", description: "DarkFactory PRD drift report" }
 ];
 
-export const WORKER_PULL_REQUEST_AUTHORS = new Set(["github-actions[bot]", "mp-agents[bot]"]);
+export const WORKER_PULL_REQUEST_AUTHORS = new Set([
+  "github-actions[bot]",
+  "mp-agents[bot]",
+  "app/darkfactory-agent",
+  "darkfactory-agent"
+]);
 export const WORKER_STATE_LABELS = ["df:running", "df:blocked", "df:done"];
 export const PLANNER_RECONCILED_LABELS = [
   "df:ready",
@@ -57,14 +66,113 @@ export function repoName(repository) {
   return `${repository.owner}/${repository.repo}`;
 }
 
+export function normalizedRepoName(repository) {
+  return repoName(repository).toLowerCase();
+}
+
 export function isParkedRepo(repository) {
-  return PARKED_REPOS.has(repoName(repository).toLowerCase());
+  return PARKED_REPOS.has(normalizedRepoName(repository));
 }
 
 export function assertAllowedRepo(repository) {
   if (isParkedRepo(repository)) {
     throw new Error(`Refusing to touch parked repository: ${repoName(repository)}`);
   }
+}
+
+export async function readManagedRepoRegistry(root = process.cwd()) {
+  const registry = await readLocalJson(path.join(root, MANAGED_REPOS_PATH), { schemaVersion: 1, repositories: {} });
+  const repositories = registry?.repositories && typeof registry.repositories === "object"
+    ? registry.repositories
+    : {};
+  return { ...registry, repositories };
+}
+
+export function managedRepoLifecycleState(repository, registry) {
+  const repositories = registry?.repositories && typeof registry.repositories === "object"
+    ? registry.repositories
+    : {};
+  const entry = repositories[normalizedRepoName(repository)] ?? repositories[repoName(repository)];
+  const state = typeof entry === "string" ? entry : entry?.state;
+  if (!state) return "removed";
+  if (!MANAGED_REPO_STATES.has(state)) {
+    throw new Error(`Invalid DarkFactory managed repository state '${state}' for ${repoName(repository)}.`);
+  }
+  return state;
+}
+
+export function isActiveManagedRepo(repository, registry) {
+  return managedRepoLifecycleState(repository, registry) === "active";
+}
+
+export function normalizeInstallationRepository(repository) {
+  if (repository?.full_name) {
+    return {
+      repository: parseRepo(repository.full_name),
+      archived: repository.archived === true,
+      disabled: repository.disabled === true
+    };
+  }
+
+  if (repository?.owner?.login && repository?.name) {
+    return {
+      repository: { owner: repository.owner.login, repo: repository.name },
+      archived: repository.archived === true,
+      disabled: repository.disabled === true
+    };
+  }
+
+  return null;
+}
+
+export async function listInstallationRepositories(gh) {
+  const repositories = [];
+  for (let page = 1; page <= 20; page += 1) {
+    const data = await gh.request("GET", `/installation/repositories?per_page=100&page=${page}`);
+    if (!Array.isArray(data.repositories) || data.repositories.length === 0) break;
+    repositories.push(...data.repositories);
+    if (data.repositories.length < 100) break;
+  }
+  return repositories;
+}
+
+export async function listActiveManagedRepos(gh, controlRepo, options = {}) {
+  const registry = options.registry ?? await readManagedRepoRegistry(options.root ?? process.cwd());
+  const installationRepositories = options.repositories ?? await listInstallationRepositories(gh);
+  const warn = options.warn ?? console.warn;
+  const active = [];
+
+  for (const installationRepository of installationRepositories) {
+    const normalized = normalizeInstallationRepository(installationRepository);
+    if (!normalized) continue;
+    const { repository, archived, disabled } = normalized;
+    if (repository.owner !== controlRepo.owner) continue;
+
+    const state = managedRepoLifecycleState(repository, registry);
+    if (archived || disabled) {
+      warn(`DarkFactory skipped ${repoName(repository)} because GitHub reports archived=${archived} disabled=${disabled}.`);
+      continue;
+    }
+    if (state !== "active") {
+      warn(`DarkFactory skipped ${repoName(repository)} because managed lifecycle state is '${state}'.`);
+      continue;
+    }
+    active.push(repository);
+  }
+
+  active.sort((a, b) => normalizedRepoName(a).localeCompare(normalizedRepoName(b)));
+  return active;
+}
+
+export function isRepositoryReadOnlyError(error) {
+  if (error?.status !== 403) return false;
+  return /\b(archived|disabled|read-?only|read only)\b/i.test(error.message || "");
+}
+
+export function warnReadOnlyRepository(repository, error, action = "write", warn = console.warn) {
+  if (!isRepositoryReadOnlyError(error)) return false;
+  warn(`DarkFactory skipped ${action} for ${repoName(repository)} because the repository is archived, disabled, or read-only: ${error.message || String(error)}`);
+  return true;
 }
 
 export function slug(value) {
@@ -129,6 +237,53 @@ export function isDarkFactoryWorkerPullRequest(pull, repository) {
   );
 }
 
+export async function findOpenWorkerPullRequestForIssue(gh, repository, issueNumber) {
+  const query = `
+    query WorkerPulls($owner: String!, $repo: String!, $cursor: String) {
+      repository(owner: $owner, name: $repo) {
+        pullRequests(states: OPEN, first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            id
+            number
+            title
+            body
+            url
+            headRefName
+            baseRefName
+            headRepository {
+              name
+              owner { login }
+            }
+            author { login }
+          }
+        }
+      }
+    }`;
+  let cursor = null;
+
+  for (let page = 1; page <= 20; page += 1) {
+    const data = await gh.graphql(query, { owner: repository.owner, repo: repository.repo, cursor });
+    const connection = data.repository.pullRequests;
+    const match = connection.nodes.find((pull) => {
+      return (
+        pull.headRefName?.startsWith(`df/${issueNumber}-`) &&
+        darkFactoryWorkerIssueNumber(pull) === issueNumber &&
+        isDarkFactoryWorkerPullRequest(pull, repository)
+      );
+    });
+    if (match) return match;
+
+    if (!connection.pageInfo?.hasNextPage) break;
+    cursor = connection.pageInfo.endCursor;
+  }
+
+  return null;
+}
+
 export function darkFactoryWorkerIssueNumber(pull) {
   const provenance = `${pull.title || ""}\n${pull.body || ""}`;
   const marker = provenance.match(/<!--\s*dark-factory:worker-pr\s+issue=(\d+)\s*-->/i);
@@ -142,10 +297,18 @@ export async function cleanupTempRoot(tempRoot, warn = console.warn) {
     await rm(tempRoot, { recursive: true, force: true });
     return { ok: true, warning: "" };
   } catch (error) {
+    if (isIgnorableCleanupError(error)) {
+      return { ok: true, warning: "" };
+    }
+
     const warning = `DarkFactory cleanup warning: ${error.message || String(error)}`;
     warn(warning);
     return { ok: false, warning };
   }
+}
+
+export function isIgnorableCleanupError(error) {
+  return error?.code === "ENOENT";
 }
 
 export function createGithubClient(token, userAgent = "darkfactory") {
@@ -212,6 +375,63 @@ export async function getRepository(gh, repository) {
   return await gh.request("GET", `/repos/${repoName(repository)}`);
 }
 
+export async function getBranchProtection(gh, repository, branch) {
+  try {
+    const data = await gh.request(
+      "GET",
+      `/repos/${repoName(repository)}/branches/${encodeURIComponent(branch)}/protection`
+    );
+    return { configured: true, data };
+  } catch (error) {
+    if (error.status === 403 || error.status === 404) {
+      return {
+        configured: false,
+        status: error.status,
+        reason: error.message || String(error)
+      };
+    }
+    throw error;
+  }
+}
+
+export async function preflightMergePolicy(gh, repository, baseBranch, repo) {
+  const branchProtection = await getBranchProtection(gh, repository, baseBranch);
+  const autoMergeSupported = repo.allow_auto_merge === true;
+
+  if (!branchProtection.configured) {
+    return {
+      blocked: false,
+      useAutomerge: false,
+      autoMergeSupported,
+      branchProtection,
+      summary: `no branch protection on \`${baseBranch}\`; green-PR sweep will squash-merge directly after checks`
+    };
+  }
+
+  if (autoMergeSupported) {
+    return {
+      blocked: false,
+      useAutomerge: true,
+      autoMergeSupported,
+      branchProtection,
+      summary: `auto-merge is available for \`${baseBranch}\`; GitHub automerge will be attempted`
+    };
+  }
+
+  return {
+    blocked: true,
+    reason: [
+      `Target repository ${repoName(repository)} has branch protection configured on \`${baseBranch}\`,`,
+      "so DarkFactory policy requires GitHub auto-merge before dispatching a worker.",
+      "Enable repository auto-merge or open managed setup work to enable it, then re-apply `df:ready`."
+    ].join(" "),
+    useAutomerge: false,
+    autoMergeSupported,
+    branchProtection,
+    summary: `branch protection is configured on \`${baseBranch}\`, but target repository auto-merge is disabled; worker dispatch is blocked`
+  };
+}
+
 export async function getRequiredStatusCheckContexts(gh, repository, branch) {
   try {
     const data = await gh.request(
@@ -229,7 +449,7 @@ export async function getRequiredStatusCheckContexts(gh, repository, branch) {
     return [];
   } catch (error) {
     if (error.status === 404) return [];
-    if (error.status === 403 && /enable this feature/i.test(error.message || "")) return [];
+    if (error.status === 403) return [];
     throw error;
   }
 }
@@ -374,27 +594,15 @@ export function checksAreGreen(statusCheckRollup, requiredContexts = []) {
     return requiredContexts.length === 0;
   }
 
-  const allGreen = statusCheckRollup.every((check) => {
+  return statusCheckRollup.every((check) => {
     if (check.__typename === "CheckRun") {
-      return check.status === "COMPLETED" && ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(check.conclusion);
+      return check.status === "COMPLETED" && check.conclusion === "SUCCESS";
     }
     if (check.__typename === "StatusContext") {
       return check.state === "SUCCESS";
     }
     return false;
   });
-
-  if (!allGreen || requiredContexts.length === 0) return allGreen;
-
-  const present = new Set(
-    statusCheckRollup.map((check) => {
-      if (check.__typename === "CheckRun") return check.name;
-      if (check.__typename === "StatusContext") return check.context;
-      return "";
-    })
-  );
-
-  return requiredContexts.every((context) => present.has(context));
 }
 
 export function checksSummary(statusCheckRollup) {

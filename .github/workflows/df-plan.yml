@@ -102,7 +102,7 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
             echo "path=.github/scripts/df-plan.mjs" >> "$GITHUB_OUTPUT"
           else
-            echo "path=darkfactory-control/.github/scripts/df-plan.mjs" >> "$GITHUB_OUTPUT"
+            echo "path=.github/scripts/df-plan.mjs" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Checkout DarkFactory control scripts
@@ -111,7 +111,6 @@ jobs:
         with:
           repository: marius-patrik/agent-darkfactory
           ref: ${{ github.sha }}
-          path: darkfactory-control
           persist-credentials: false
 
       # The cross-repo planning sweep runs from the control repository and needs

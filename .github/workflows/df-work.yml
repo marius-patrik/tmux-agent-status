@@ -11,6 +11,10 @@ on:
         description: Target issue number.
         required: true
         type: string
+      base_ref:
+        description: Target repository base branch for regenerated work.
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -69,6 +73,7 @@ jobs:
           permission-contents: write
           permission-issues: write
           permission-pull-requests: write
+          permission-workflows: write
 
       - name: Run worker
         env:
@@ -77,6 +82,7 @@ jobs:
           DF_CONTROL_REPO: marius-patrik/agent-darkfactory
           DF_TARGET_REPO: ${{ inputs.repo }}
           DF_TARGET_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          DF_TARGET_BASE_REF: ${{ inputs.base_ref }}
           DF_TRIGGER: ${{ github.event_name }}
           DF_DATA_REPO: marius-patrik/darkfactory-data
         run: node darkfactory-control/.github/scripts/df-work.mjs

@@ -11,8 +11,10 @@ import {
   findPrdMarker,
   getOptionalFileContent,
   getRepository,
-  isParkedRepo,
+  isActiveManagedRepo,
+  listActiveManagedRepos,
   listIssues,
+  readManagedRepoRegistry,
   parsePrdItems,
   parseRepo,
   plannedIssueLabelDiff,
@@ -20,6 +22,7 @@ import {
   repoName,
   requiredEnv,
   slug,
+  warnReadOnlyRepository,
   writeRunLedger
 } from "./df-lib.mjs";
 
@@ -38,22 +41,32 @@ main().catch((error) => {
 });
 
 async function main() {
-  const targets = PLAN_ALL ? await targetRepositories() : [TARGET_REPO];
+  const registry = await readManagedRepoRegistry();
+  const targets = PLAN_ALL ? await listActiveManagedRepos(gh, CONTROL_REPO, { registry }) : [TARGET_REPO];
   for (const target of targets) {
     TARGET_REPO = target;
-    if (isParkedRepo(TARGET_REPO)) {
-      console.log(`DarkFactory planning skipped parked repository ${repoName(TARGET_REPO)}.`);
+    if (!isActiveManagedRepo(TARGET_REPO, registry)) {
+      console.warn(`DarkFactory planning skipped ${repoName(TARGET_REPO)} because managed lifecycle state is not active.`);
       continue;
     }
-    await reconcileTargetRepository();
+    try {
+      await reconcileTargetRepository();
+    } catch (error) {
+      if (warnReadOnlyRepository(TARGET_REPO, error, "planning")) continue;
+      throw error;
+    }
   }
 }
 
 async function reconcileTargetRepository() {
   assertAllowedRepo(TARGET_REPO);
-  await ensureLabels(gh, TARGET_REPO, [...PLANNING_LABELS, ...WORK_LABELS]);
-
   const repo = await getRepository(gh, TARGET_REPO);
+  if (repo.archived === true || repo.disabled === true) {
+    console.warn(`DarkFactory planning skipped ${repoName(TARGET_REPO)} because GitHub reports archived=${repo.archived === true} disabled=${repo.disabled === true}.`);
+    return;
+  }
+
+  await ensureLabels(gh, TARGET_REPO, [...PLANNING_LABELS, ...WORK_LABELS]);
   const sourceRef = PLAN_ALL ? repo.default_branch : TARGET_REF || repo.default_branch;
   const prdSources = await getPrdSources(TARGET_REPO, sourceRef);
   const ledger = {
@@ -273,19 +286,6 @@ async function getRecursiveTree(repository, ref) {
       `/repos/${repoName(repository)}/git/trees/${encodeURIComponent(treeSha)}?recursive=1`
     );
   }
-}
-
-async function targetRepositories() {
-  const repositories = [];
-  for (let page = 1; page <= 20; page += 1) {
-    const data = await gh.request("GET", `/installation/repositories?per_page=100&page=${page}`);
-    if (!Array.isArray(data.repositories) || data.repositories.length === 0) break;
-    repositories.push(...data.repositories);
-    if (data.repositories.length < 100) break;
-  }
-  return repositories
-    .map((repo) => parseRepo(repo.full_name))
-    .filter((repo) => repo.owner === CONTROL_REPO.owner && !isParkedRepo(repo));
 }
 
 async function setIssueLabels(repository, issueNumber, labels, options = {}) {

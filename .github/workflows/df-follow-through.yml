@@ -13,7 +13,12 @@ on:
         description: Optional comma-separated repositories to skip.
         required: false
         type: string
-        default: marius-patrik/agents-harness
+        default: ""
+  workflow_run:
+    workflows:
+      - DarkFactory Work
+    types:
+      - completed
 
 permissions:
   contents: read
@@ -27,7 +32,12 @@ jobs:
         github.repository == 'marius-patrik/agent-darkfactory' &&
         (
           github.event_name == 'schedule' ||
-          github.event_name == 'workflow_dispatch'
+          github.event_name == 'workflow_dispatch' ||
+          (
+            github.event_name == 'workflow_run' &&
+            github.event.workflow_run.head_branch == 'main' &&
+            github.event.workflow_run.conclusion == 'success'
+          )
         )
       }}
     permissions:
@@ -47,7 +57,7 @@ jobs:
             exit 1
           fi
 
-          # Scheduled and workflow_dispatch events reliably set GITHUB_REF; the
+          # Scheduled, workflow_dispatch, and workflow_run events reliably set GITHUB_REF; the
           # immutable branch ref is the trusted gate before minting the app token.
           if [[ "${GITHUB_REF:-}" != "refs/heads/main" ]]; then
             echo "::error::DarkFactory privileged follow-through can only run from refs/heads/main."
@@ -65,7 +75,7 @@ jobs:
           # Pin control scripts to the exact trusted event commit before any
           # installation token is minted.
           ref: ${{ github.sha }}
-          path: darkfactory-control
+          # checkout at workspace root
           persist-credentials: false
 
       - name: Mint mp-agents installation token
@@ -86,11 +96,11 @@ jobs:
           DF_CONTROL_REPO: ${{ github.repository }}
           DF_FOLLOW_THROUGH_MODE: sweep
           DF_SWEEP_REPOS: ${{ github.event_name == 'workflow_dispatch' && inputs.repos || '' }}
-          DF_SWEEP_EXCLUDE_REPOS: ${{ github.event_name == 'workflow_dispatch' && inputs.exclude_repos || 'marius-patrik/agents-harness' }}
+          DF_SWEEP_EXCLUDE_REPOS: ${{ github.event_name == 'workflow_dispatch' && inputs.exclude_repos || '' }}
           DF_ALLOW_NO_CHECK_REPOS: ${{ vars.DF_ALLOW_NO_CHECK_REPOS }}
           DF_TRIGGER: ${{ github.event_name }}
           DF_DATA_REPO: marius-patrik/darkfactory-data
         shell: bash
         run: |
           export GITHUB_EVENT_PAYLOAD="$(cat "$GITHUB_EVENT_PATH")"
-          node darkfactory-control/.github/scripts/df-sweep.mjs
+          node .github/scripts/df-sweep.mjs
