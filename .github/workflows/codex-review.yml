@@ -1,0 +1,180 @@
+name: Codex Review
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  codex-review:
+    name: Codex Review
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.pull_request.draft }}
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build Codex review image
+        run: docker build -f .github/codex-review.Dockerfile -t darkfactory-codex-review .
+
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: pr-workspace
+
+      - name: Pin trusted review base
+        env:
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git -C pr-workspace cat-file -e "${REVIEW_BASE_SHA}^{commit}"
+          git -C pr-workspace update-ref refs/review/base "${REVIEW_BASE_SHA}"
+
+      - name: Prepare review context
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const contextDir = "review-context";
+            fs.mkdirSync(contextDir, { recursive: true });
+
+            const contextFiles = [
+              "AGENTS.md",
+              ".agents/AGENTS.md",
+              ".agents/.project/AGENTS.md",
+              ".agents/.project/PROJECT.md",
+              ".agents/.project/COMMANDS.md",
+              ".agents/.project/STATUS.md",
+              ".agents/.project/HANDOFF.md",
+            ];
+            const agentSections = [];
+            for (const file of contextFiles) {
+              if (fs.existsSync(file)) {
+                agentSections.push([`# ${file}`, "", fs.readFileSync(file, "utf8")].join("\n"));
+              }
+            }
+            fs.writeFileSync(
+              path.join(contextDir, "AGENTS.md"),
+              agentSections.length
+                ? agentSections.join("\n\n---\n\n")
+                : "No managed agent context files were found in the base branch checkout.",
+            );
+
+            const body = context.payload.pull_request?.body ?? "";
+            const issueNumbers = Array.from(
+              body.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi),
+              (match) => Number(match[1]),
+            );
+            const uniqueIssueNumbers = [...new Set(issueNumbers)];
+            const { owner, repo } = context.repo;
+            const issueSections = [];
+
+            for (const issue_number of uniqueIssueNumbers) {
+              const issue = await github.rest.issues.get({ owner, repo, issue_number });
+              issueSections.push([
+                `# Issue #${issue_number}: ${issue.data.title}`,
+                "",
+                issue.data.body || "(issue body is empty)",
+              ].join("\n"));
+            }
+
+            fs.writeFileSync(
+              path.join(contextDir, "linked-issues.md"),
+              issueSections.length
+                ? issueSections.join("\n\n---\n\n")
+                : "No linked issue was found in the PR body using closes/fixes/resolves syntax.",
+            );
+
+      - name: Run Codex review
+        id: review
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          CODEX_REVIEW_MODEL: gpt-5.5
+          CODEX_REVIEW_EFFORT: low
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        shell: bash
+        run: |
+          if [ -z "${CODEX_AUTH_JSON:-}" ]; then
+            cat > codex-review.json <<'EOF'
+          {
+            "approved": false,
+            "summary": "Codex autoreview could not run because repository secret CODEX_AUTH_JSON is not configured.",
+            "blocking_findings": [
+              "Configure CODEX_AUTH_JSON in GitHub repository secrets to enable automated Codex PR review with Codex OAuth auth."
+            ],
+            "non_blocking_notes": []
+          }
+          EOF
+            exit 0
+          fi
+
+          CODEX_HOME_DIR="${RUNNER_TEMP}/codex-home"
+          mkdir -p "${CODEX_HOME_DIR}"
+          printf '%s' "${CODEX_AUTH_JSON}" > "${CODEX_HOME_DIR}/auth.json"
+          chmod 600 "${CODEX_HOME_DIR}/auth.json"
+
+          docker run --rm \
+            -e CODEX_HOME=/codex-home \
+            -e HOME=/codex-home \
+            -e BASE_BRANCH \
+            -e BASE_REF=refs/review/base \
+            -e REVIEW_OUTPUT=codex-review.json \
+            -e CODEX_REVIEW_MODEL \
+            -e CODEX_REVIEW_EFFORT \
+            -e REVIEW_CONTEXT_DIR=/review-context \
+            -e PR_TITLE \
+            -e PR_BODY \
+            -v "${PWD}/pr-workspace:/workspace" \
+            -v "${PWD}/review-context:/review-context:ro" \
+            -v "${CODEX_HOME_DIR}:/codex-home" \
+            darkfactory-codex-review
+
+          cp pr-workspace/codex-review.json codex-review.json
+
+      - name: Comment review
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const review = JSON.parse(fs.readFileSync("codex-review.json", "utf8"));
+            const marker = "<!-- darkfactory-codex-review -->";
+            const blocking = review.blocking_findings.length
+              ? review.blocking_findings.map((item) => `- ${item}`).join("\n")
+              : "- None";
+            const notes = review.non_blocking_notes.length
+              ? review.non_blocking_notes.map((item) => `- ${item}`).join("\n")
+              : "- None";
+            const verdict = review.approved ? "Approved" : "Changes required";
+            const commentBody = `${marker}\n## Codex Autoreview\n\n**Verdict:** ${verdict}\n\n${review.summary}\n\n### Blocking Findings\n\n${blocking}\n\n### Non-Blocking Notes\n\n${notes}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
+            const existing = comments.data.find((comment) => comment.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body: commentBody });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body: commentBody });
+            }
+
+      - name: Enforce Codex verdict
+        if: always()
+        shell: bash
+        run: |
+          node -e "const fs = require('fs'); const r = JSON.parse(fs.readFileSync('codex-review.json', 'utf8')); if (!r.approved) { console.error('Codex review did not approve this PR.'); process.exit(1); }"

@@ -1,0 +1,26 @@
+name: DarkFactory Auto Update
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  managed-update-check:
+    name: Managed update check
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify managed setup
+        run: node .github/scripts/dark-factory-managed-check.mjs
+
+      - name: Explain centralized sync
+        run: |
+          echo "DarkFactory central sync opens managed setup PRs through the GitHub App."
+          echo "This scheduled workflow verifies the repo can still receive managed updates."

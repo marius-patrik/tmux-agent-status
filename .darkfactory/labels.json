@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "labels": [
+    {
+      "name": "P0",
+      "color": "B60205",
+      "description": "Priority 0: urgent or release-blocking"
+    },
+    {
+      "name": "P1",
+      "color": "D93F0B",
+      "description": "Priority 1: important planned work"
+    },
+    {
+      "name": "P2",
+      "color": "FBCA04",
+      "description": "Priority 2: follow-up or lower urgency"
+    },
+    {
+      "name": "roadmap",
+      "color": "5319E7",
+      "description": "DarkFactory roadmap item"
+    },
+    {
+      "name": "df:ready",
+      "color": "0E8A16",
+      "description": "DarkFactory work loop may pick up this issue"
+    },
+    {
+      "name": "df:running",
+      "color": "1D76DB",
+      "description": "DarkFactory worker is running for this issue"
+    },
+    {
+      "name": "df:blocked",
+      "color": "B60205",
+      "description": "DarkFactory worker is blocked on this issue"
+    },
+    {
+      "name": "df:done",
+      "color": "5319E7",
+      "description": "DarkFactory worker completed this issue"
+    },
+    {
+      "name": "df:class:mechanical",
+      "color": "C5DEF5",
+      "description": "Mechanical worker task with a narrow deterministic surface"
+    },
+    {
+      "name": "df:class:standard",
+      "color": "BFDADC",
+      "description": "Standard worker task with normal implementation complexity"
+    },
+    {
+      "name": "df:class:hard",
+      "color": "D4C5F9",
+      "description": "Hard worker task with substantial implementation complexity"
+    },
+    {
+      "name": "df:ask-owner",
+      "color": "F9D0C4",
+      "description": "Needs owner input before DarkFactory continues"
+    }
+  ]
+}

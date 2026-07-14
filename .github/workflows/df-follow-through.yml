@@ -1,0 +1,106 @@
+name: DarkFactory Follow Through
+
+on:
+  schedule:
+    - cron: "41 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: Optional comma-separated repositories to sweep.
+        required: false
+        type: string
+      exclude_repos:
+        description: Optional comma-separated repositories to skip.
+        required: false
+        type: string
+        default: ""
+  workflow_run:
+    workflows:
+      - DarkFactory Verify Worker Claim
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: Green PR sweep
+    runs-on: ubuntu-24.04
+    if: >-
+      ${{
+        github.repository == 'marius-patrik/DarkFactory' &&
+        (
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch' ||
+          (
+            github.event_name == 'workflow_run' &&
+            github.event.workflow_run.head_branch == 'main' &&
+            github.event.workflow_run.conclusion == 'success' &&
+            github.event.workflow_run.workflow_name == 'DarkFactory Verify Worker Claim'
+          )
+        )
+      }}
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Validate trusted control ref
+        shell: bash
+        run: |
+          # Privileged follow-through mints an installation token, so it only
+          # runs from the canonical control repository's protected default branch.
+          if [[ "${GITHUB_REPOSITORY}" != "marius-patrik/DarkFactory" ]]; then
+            echo "::error::DarkFactory privileged follow-through can only run from marius-patrik/DarkFactory."
+            exit 1
+          fi
+
+          # Scheduled, workflow_dispatch, and workflow_run events reliably set GITHUB_REF; the
+          # immutable branch ref is the trusted gate before minting the app token.
+          if [[ "${GITHUB_REF:-}" != "refs/heads/main" ]]; then
+            echo "::error::DarkFactory privileged follow-through can only run from refs/heads/main."
+            exit 1
+          fi
+
+          if [[ "${GITHUB_REF_TYPE:-}" == "branch" && "${GITHUB_REF_NAME:-}" != "main" ]]; then
+            echo "::error::DarkFactory privileged follow-through branch mismatch."
+            exit 1
+          fi
+
+      - name: Checkout DarkFactory from this repository
+        uses: actions/checkout@v4
+        with:
+          # Pin control scripts to the exact trusted event commit before any
+          # installation token is minted.
+          ref: ${{ github.sha }}
+          # checkout at workspace root
+          persist-credentials: false
+
+      - name: Mint mp-agents installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.DARK_FACTORY_APP_ID }}
+          private-key: ${{ secrets.DARK_FACTORY_PRIVATE_KEY }}
+          owner: marius-patrik
+          permission-actions: read
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Run follow-through
+        env:
+          DARK_FACTORY_TOKEN: ${{ steps.app-token.outputs.token }}
+          DF_CONTROL_REPO: ${{ github.repository }}
+          DF_FOLLOW_THROUGH_MODE: sweep
+          DF_SWEEP_REPOS: ${{ github.event_name == 'workflow_dispatch' && inputs.repos || '' }}
+          DF_SWEEP_EXCLUDE_REPOS: ${{ github.event_name == 'workflow_dispatch' && inputs.exclude_repos || '' }}
+          DF_ALLOW_NO_CHECK_REPOS: ${{ vars.DF_ALLOW_NO_CHECK_REPOS }}
+          DF_TRIGGER: ${{ github.event_name }}
+        shell: bash
+        run: |
+          export GITHUB_EVENT_PAYLOAD="$(cat "$GITHUB_EVENT_PATH")"
+          node .github/scripts/df-sweep.mjs

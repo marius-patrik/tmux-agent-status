@@ -1,0 +1,113 @@
+name: DarkFactory Orchestrate
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: Optional managed repository in owner/name form to scope this run.
+        required: false
+        type: string
+      issue_number:
+        description: Optional managed issue number to scope this run.
+        required: false
+        type: string
+      source_event:
+        description: Optional source event name for a scoped control dispatch.
+        required: false
+        type: string
+  workflow_run:
+    workflows:
+      - DarkFactory Plan
+      - DarkFactory Work
+      - DarkFactory Follow Through
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  orchestrate:
+    name: Dispatch ready work
+    runs-on: ubuntu-24.04
+    if: >-
+      ${{
+        github.repository == 'marius-patrik/DarkFactory' &&
+        (
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch' ||
+          (
+            github.event_name == 'workflow_run' &&
+            github.event.workflow_run.head_branch == 'main' &&
+            github.event.workflow_run.conclusion == 'success'
+          )
+        )
+      }}
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - name: Validate trusted control ref
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REPOSITORY}" != "marius-patrik/DarkFactory" ]]; then
+            echo "::error::DarkFactory privileged orchestration can only run from marius-patrik/DarkFactory."
+            exit 1
+          fi
+
+          if [[ "${GITHUB_REF:-}" != "refs/heads/main" ]]; then
+            echo "::error::DarkFactory privileged orchestration can only run from refs/heads/main."
+            exit 1
+          fi
+
+          if [[ "${GITHUB_REF_TYPE:-}" == "branch" && "${GITHUB_REF_NAME:-}" != "main" ]]; then
+            echo "::error::DarkFactory privileged orchestration branch mismatch."
+            exit 1
+          fi
+
+      - name: Resolve DarkFactory script path
+        id: script-path
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            echo "path=.github/scripts/df-orchestrate.mjs" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=.github/scripts/df-orchestrate.mjs" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout DarkFactory control repository
+        uses: actions/checkout@v4
+        with:
+          repository: marius-patrik/DarkFactory
+          # Pin control scripts to the exact trusted event commit before any
+          # installation token is minted.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Mint mp-agents installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.DARK_FACTORY_APP_ID }}
+          private-key: ${{ secrets.DARK_FACTORY_PRIVATE_KEY }}
+          owner: marius-patrik
+          permission-actions: write
+          permission-contents: write
+          permission-issues: write
+          permission-workflows: write
+
+      - name: Run orchestrator
+        env:
+          DARK_FACTORY_TOKEN: ${{ steps.app-token.outputs.token }}
+          DF_CONTROL_REPO: marius-patrik/DarkFactory
+          DF_TRIGGER: ${{ github.event_name }}
+          DF_TARGET_REPO: ${{ inputs.repo }}
+          DF_TARGET_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          DF_SOURCE_EVENT: ${{ inputs.source_event }}
+        shell: bash
+        run: |
+          export GITHUB_EVENT_PAYLOAD="$(cat "$GITHUB_EVENT_PATH")"
+          node ${{ steps.script-path.outputs.path }}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "installer": {
+    "required": false,
+    "paths": ["install/install.sh", "install/install.ps1"],
+    "postInstallChecks": ["state-init", "doctor"],
+    "notes": "CLI repos should provide platform installers and smoke them in their authoritative validation gates. Library, app, and documentation repos may leave installers absent."
+  },
+  "autoUpdater": {
+    "centralized": true,
+    "workflow": ".github/workflows/dark-factory-autoupdate.yml",
+    "source": "marius-patrik/Andromeda-data",
+    "notes": "DarkFactory performs central managed setup sync through its GitHub App. Per-repo updater workflows verify that managed files are present and current enough to receive updates."
+  }
+}
