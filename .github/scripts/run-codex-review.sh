@@ -2,8 +2,7 @@
 set -euo pipefail
 
 REVIEW_OUTPUT="${REVIEW_OUTPUT:-codex-review.json}"
-BASE_REF="${BASE_REF:-origin/main}"
-BASE_BRANCH="${BASE_BRANCH:-main}"
+BASE_REF="${BASE_REF:-refs/review/base}"
 CODEX_HOME="${CODEX_HOME:-/tmp/codex-home}"
 SCHEMA_PATH="${SCHEMA_PATH:-/opt/codex-review/schema.json}"
 REVIEW_CONTEXT_DIR="${REVIEW_CONTEXT_DIR:-/review-context}"
@@ -49,7 +48,7 @@ if [ ! -s "${CODEX_HOME}/auth.json" ]; then
 fi
 
 git config --global --add safe.directory /workspace
-git fetch origin "${BASE_BRANCH}"
+git cat-file -e "${BASE_REF}^{commit}"
 
 AGENTS_CONTEXT="${REVIEW_CONTEXT_DIR}/AGENTS.md"
 ISSUE_CONTEXT="${REVIEW_CONTEXT_DIR}/linked-issues.md"

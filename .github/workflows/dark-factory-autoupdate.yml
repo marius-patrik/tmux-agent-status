@@ -11,14 +11,14 @@ permissions:
 jobs:
   managed-update-check:
     name: Managed update check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Verify managed setup
-        run: node .github/scripts/dark-factory-release-check.mjs --mode managed
+        run: node .github/scripts/dark-factory-managed-check.mjs
 
       - name: Explain centralized sync
         run: |

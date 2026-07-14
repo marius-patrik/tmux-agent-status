@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "description": "DarkFactory deterministic enforcement-rule registry. Each rule is evaluated by df-work before dispatch and df-follow-through before merge. Rules are declarative: add new entries here and register an evaluator in df-enforcement.mjs to extend the gate set without changing callers.",
+  "rules": [
+    {
+      "id": "parked-repos-untouched",
+      "enabled": true,
+      "severity": "block",
+      "description": "DarkFactory must never dispatch workers or merge follow-through actions into parked repositories."
+    },
+    {
+      "id": "work-PRs-target-dev",
+      "enabled": true,
+      "severity": "block",
+      "description": "Worker pull requests must target the integration branch (dev) per the repo branching model.",
+      "parameters": {
+        "defaultBranch": "dev"
+      }
+    },
+    {
+      "id": "never-merge-red",
+      "enabled": true,
+      "severity": "block",
+      "description": "All required status checks must report success before a worker PR may merge."
+    },
+    {
+      "id": "no-force-push",
+      "enabled": true,
+      "severity": "block",
+      "description": "Worker branches must not be force-pushed after the worker PR is opened."
+    },
+    {
+      "id": "no-admin-bypass",
+      "enabled": true,
+      "severity": "block",
+      "description": "DarkFactory must never use admin override to merge or push."
+    },
+    {
+      "id": "secrets-never-logged",
+      "enabled": true,
+      "severity": "warn",
+      "description": "Worker and follow-through logs must redact tokens and secrets."
+    }
+  ]
+}

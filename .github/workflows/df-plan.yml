@@ -21,21 +21,22 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
   issues: write
+  pull-requests: write
 
 jobs:
   df-plan:
     name: Reconcile PRD backlog
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # PRD-edit triggers run in every managed repo using the repository token.
     # Scheduled and manual cross-repo sweeps need the DarkFactory app secrets
     # and therefore run only in the control repository.
     if: >-
       ${{
         github.event_name == 'push' ||
-        (github.event_name == 'schedule' && github.repository == 'marius-patrik/agent-darkfactory') ||
-        (github.event_name == 'workflow_dispatch' && github.repository == 'marius-patrik/agent-darkfactory')
+        (github.event_name == 'schedule' && github.repository == 'marius-patrik/DarkFactory') ||
+        (github.event_name == 'workflow_dispatch' && github.repository == 'marius-patrik/DarkFactory')
       }}
 
     steps:
@@ -43,7 +44,7 @@ jobs:
         shell: bash
         run: |
           # Privileged planning uses installation or repository tokens, so it only
-          # runs from a trusted default branch in an allowed owner.
+          # runs from the trusted control branch in an allowed owner.
           if [[ "${GITHUB_REPOSITORY_OWNER}" != "marius-patrik" ]]; then
             echo "::error::DarkFactory privileged planning can only run in the marius-patrik owner."
             exit 1
@@ -93,7 +94,7 @@ jobs:
           esac
 
       # PRD-edit triggers in managed repos run from that repository's installed,
-      # version-enforced payload. Scheduled and manual cross-repo sweeps run from
+      # managed payload. Scheduled and manual cross-repo sweeps run from
       # the control repository at the exact SHA that triggered the workflow.
       - name: Resolve DarkFactory script path
         id: script-path
@@ -105,11 +106,17 @@ jobs:
             echo "path=.github/scripts/df-plan.mjs" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Checkout target repository scripts
+        if: github.event_name == 'push'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Checkout DarkFactory control scripts
         if: github.event_name != 'push'
         uses: actions/checkout@v4
         with:
-          repository: marius-patrik/agent-darkfactory
+          repository: marius-patrik/DarkFactory
           ref: ${{ github.sha }}
           persist-credentials: false
 
@@ -125,16 +132,16 @@ jobs:
           app-id: ${{ secrets.DARK_FACTORY_APP_ID }}
           private-key: ${{ secrets.DARK_FACTORY_PRIVATE_KEY }}
           owner: marius-patrik
-          permission-contents: read
+          permission-contents: write
           permission-issues: write
+          permission-pull-requests: write
 
       - name: Run planner
         env:
           DARK_FACTORY_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          DF_CONTROL_REPO: marius-patrik/agent-darkfactory
+          DF_CONTROL_REPO: marius-patrik/DarkFactory
           DF_TARGET_REPO: ${{ github.event_name == 'workflow_dispatch' && inputs.repo || github.repository }}
           DF_TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || (github.event_name == 'push' && github.sha || '') }}
           DF_PLAN_ALL: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
           DF_TRIGGER: ${{ github.event_name }}
-          DF_DATA_REPO: marius-patrik/darkfactory-data
         run: node ${{ steps.script-path.outputs.path }}

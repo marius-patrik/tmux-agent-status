@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "description": "DarkFactory deterministic cross-repository control-plane scheduling policy. Local model execution remains owned by Agent OS.",
+  "concurrency": {
+    "global": 6,
+    "perRepository": 2,
+    "perStream": 3
+  },
+  "waves": [
+    {
+      "name": "hygiene",
+      "streams": ["hygiene", "setup", "bootstrap", "sync", "audit", "docs"]
+    },
+    {
+      "name": "enforcement",
+      "streams": ["enforcement", "review", "gate", "gates", "ci", "release"]
+    },
+    {
+      "name": "features",
+      "streams": ["feature", "features", "core", "work", "default"]
+    }
+  ],
+  "dashboard": {
+    "enabled": true,
+    "issueTitle": "DarkFactory L6 Orchestration Dashboard"
+  }
+}

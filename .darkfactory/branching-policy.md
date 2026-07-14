@@ -1,10 +1,11 @@
 # DarkFactory Branching Policy
 
-Managed repositories use `dev` as the integration branch and `main` as the release branch.
+Managed code repositories use `dev` for work integration and `main` for the
+canonical Agent OS product state.
 
 - Work pull requests target `dev`.
-- `dev` to `main` pull requests are releases only.
-- Merging to `main` should correspond to tag and GitHub release automation where the repository ships releases.
-- Data repositories, the umbrella repository, and workspace repositories may commit continuously on `main` when they are used as canonical state rather than product code.
+- Agent OS integration pull requests move reviewed `dev` state to `main`.
+- Component repositories do not define independent version, tag, or release authority.
+- State and data repositories may commit directly to `main` when their own policy permits it.
 
-This is the owner-mandated model tracked by `marius-patrik/agent-darkfactory#17`.
+This policy is owned by the canonical `marius-patrik/agents-manager` source repository.

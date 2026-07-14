@@ -1,5 +1,6 @@
 import {
-  DEFAULT_DATA_REPO,
+  CODEX_REVIEW_REQUIRED_CONTEXT,
+  DARK_FACTORY_DATA_REPO,
   assertAllowedRepo,
   checksAreGreen,
   checksSummary,
@@ -7,8 +8,10 @@ import {
   darkFactoryWorkerIssueNumber,
   extractClosingIssueNumbers,
   getRepository,
+  getOptionalFileContent,
   getRequiredStatusCheckContexts,
   isDarkFactoryWorkerPullRequest as isWorkerPullRequest,
+  isVerifiedWorkerIssue,
   isParkedRepo,
   listActiveManagedRepos,
   managedRepoLifecycleState,
@@ -18,9 +21,11 @@ import {
   repoName,
   requiredEnv,
   warnReadOnlyRepository,
+  withCodexReviewRequiredContext,
   writeRunLedger
 } from "./df-lib.mjs";
 import { pathToFileURL } from "node:url";
+import { evaluateEnforcementRules, loadEnforcementRules } from "./df-enforcement.mjs";
 
 const MODE = process.env.DF_FOLLOW_THROUGH_MODE ?? "sweep";
 const TRIGGER = process.env.DF_TRIGGER ?? "unknown";
@@ -32,12 +37,11 @@ const NO_CHECK_ALLOWLIST = new Set(
 const EMPTY_CHECK_SETTLE_MS = 10 * 60 * 1000;
 let gh;
 let CONTROL_REPO;
-let DATA_REPO = process.env.DF_DATA_REPO ?? DEFAULT_DATA_REPO;
+const DATA_REPO = DARK_FACTORY_DATA_REPO;
 
 export function configureSweepRuntime(options) {
   gh = options.gh;
   CONTROL_REPO = options.controlRepo;
-  DATA_REPO = options.dataRepo ?? DEFAULT_DATA_REPO;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -52,8 +56,7 @@ async function main() {
   const token = requiredEnv("DARK_FACTORY_TOKEN");
   configureSweepRuntime({
     gh: createGithubClient(token, "darkfactory-sweep"),
-    controlRepo: parseRepo(requiredEnv("DF_CONTROL_REPO")),
-    dataRepo: process.env.DF_DATA_REPO ?? DEFAULT_DATA_REPO
+    controlRepo: parseRepo(requiredEnv("DF_CONTROL_REPO"))
   });
 
   if (MODE === "dev-merge") {
@@ -63,6 +66,7 @@ async function main() {
 
   const repos = await targetRepositories();
   const excluded = new Set(repoList(process.env.DF_SWEEP_EXCLUDE_REPOS || DEFAULT_EXCLUDED_REPOS).map((repo) => repoName(repo).toLowerCase()));
+  const enforcementRules = await loadEnforcementRules();
   const ledger = {
     trigger: TRIGGER,
     mode: MODE,
@@ -93,7 +97,7 @@ async function main() {
       console.log(`DarkFactory sweep listed ${pulls.length} open ${[...baseBranches].join(",")} worker candidate PRs for ${repoName(repository)}.`);
       for (const pull of pulls) {
         try {
-          const result = await considerPullRequest(repository, pull);
+          const result = await considerPullRequest(repository, pull, enforcementRules);
           console.log(formatPullDecision(repository, pull, result));
           ledger.actions.push(result);
         } catch (error) {
@@ -142,17 +146,49 @@ function formatPullDecision(repository, pull, result) {
   ].join(" ");
 }
 
-export async function considerPullRequest(repository, pull) {
+export async function considerPullRequest(repository, pull, enforcementRules = null) {
   const ref = `${repoName(repository)}#${pull.number}`;
 
   if (pull.isDraft) return { repo: repoName(repository), pr: ref, action: "skip", reason: "draft" };
   if (!isWorkerPullRequest(pull, repository)) return { repo: repoName(repository), pr: ref, action: "skip", reason: "not-worker-pr" };
 
+  const rules = enforcementRules ?? (await loadEnforcementRules());
+  const registry = await readManagedRepoRegistry();
+  const branchProtectionContexts = await getRequiredStatusCheckContexts(gh, repository, pull.baseRefName);
+  const codexReview = await codexReviewProvisioning(repository, pull);
+  const requiredContexts = codexReview.required
+    ? withCodexReviewRequiredContext(branchProtectionContexts)
+    : branchProtectionContexts;
+
+  const enforcement = await evaluateEnforcementRules(rules, {
+    gh,
+    repository,
+    pull,
+    baseBranch: pull.baseRefName,
+    registry,
+    requiredContexts,
+    statusCheckRollup: pull.statusCheckRollup,
+    token: process.env.DARK_FACTORY_TOKEN || ""
+  });
+
+  if (!enforcement.ok) {
+    const issueUpdate = await markWorkerIssueBlocked(repository, pull, "enforcement-rules", [
+      ...enforcement.findings.filter((finding) => finding.severity === "block").map((finding) => `${finding.rule}: ${finding.message}`)
+    ]);
+    return {
+      repo: repoName(repository),
+      pr: ref,
+      action: "skip",
+      reason: "enforcement-rules",
+      issue_update: issueUpdate,
+      findings: enforcement.findings
+    };
+  }
+
   if (!emptyCheckRollupHasSettled(pull)) {
     return { repo: repoName(repository), pr: ref, action: "skip", reason: "checks-not-reported-yet" };
   }
 
-  const requiredContexts = await getRequiredStatusCheckContexts(gh, repository, pull.baseRefName);
   const hasReportedChecks = Array.isArray(pull.statusCheckRollup) && pull.statusCheckRollup.length > 0;
   if (!hasReportedChecks && requiredContexts.length === 0 && !NO_CHECK_ALLOWLIST.has(repoName(repository).toLowerCase())) {
     const issueUpdate = await markWorkerIssueBlocked(repository, pull, "no-checks-not-allowed", [
@@ -183,7 +219,8 @@ export async function considerPullRequest(repository, pull) {
       reason,
       issue_update: issueUpdate,
       required_checks: requiredContexts,
-      checks: checksSummary(pull.statusCheckRollup)
+      checks: checksSummary(pull.statusCheckRollup),
+      ...codexReviewLedgerGap(codexReview)
     };
   }
   if (pull.mergeable !== "MERGEABLE") {
@@ -196,9 +233,13 @@ export async function considerPullRequest(repository, pull) {
 
   const mergeGate = await getPullRequestMergeGate(repository, pull.number);
   const hasMergeGateChecks = Array.isArray(mergeGate.statusCheckRollup) && mergeGate.statusCheckRollup.length > 0;
-  if ((!hasMergeGateChecks && !NO_CHECK_ALLOWLIST.has(repoName(repository).toLowerCase())) || !checksAreGreen(mergeGate.statusCheckRollup)) {
+  if (
+    (!hasMergeGateChecks && !NO_CHECK_ALLOWLIST.has(repoName(repository).toLowerCase())) ||
+    !checksAreGreen(mergeGate.statusCheckRollup, requiredContexts)
+  ) {
     const issueUpdate = await markWorkerIssueBlocked(repository, pull, "merge-checks-not-green", [
       "Fresh merge gate check failed immediately before merge.",
+      `Required checks: ${requiredContexts.join(", ")}`,
       `Reported checks: ${checksSummary(mergeGate.statusCheckRollup) || "(none)"}`
     ]);
     return {
@@ -207,7 +248,8 @@ export async function considerPullRequest(repository, pull) {
       action: "skip",
       reason: "merge-checks-not-green",
       issue_update: issueUpdate,
-      checks: checksSummary(mergeGate.statusCheckRollup)
+      checks: checksSummary(mergeGate.statusCheckRollup),
+      ...codexReviewLedgerGap(codexReview)
     };
   }
   if (mergeGate.mergeable !== "MERGEABLE") {
@@ -218,8 +260,16 @@ export async function considerPullRequest(repository, pull) {
     return { repo: repoName(repository), pr: ref, action: "skip", reason, issue_update: issueUpdate };
   }
 
+  const issueNumber = darkFactoryWorkerIssueNumber(pull);
+  if (issueNumber) {
+    const issue = await gh.request("GET", `/repos/${repoName(repository)}/issues/${issueNumber}`);
+    if (!isVerifiedWorkerIssue(issue)) {
+      return { repo: repoName(repository), pr: ref, action: "skip", reason: "not-verified", issue: `#${issueNumber}` };
+    }
+  }
+
   const protectedBranch = await branchIsProtected(repository, pull.baseRefName);
-  if (protectedBranch) {
+  if (protectedBranch && requiredContexts.length > 0) {
     const enabled = await enableAutoMerge(pull.id);
     if (enabled.enabled) {
       return {
@@ -228,7 +278,8 @@ export async function considerPullRequest(repository, pull) {
         url: pull.url,
         action: "enable-automerge",
         result: enabled,
-        checks: checksSummary(pull.statusCheckRollup)
+        checks: checksSummary(pull.statusCheckRollup),
+        ...codexReviewLedgerGap(codexReview)
       };
     }
 
@@ -244,7 +295,8 @@ export async function considerPullRequest(repository, pull) {
         reason: "protected-branch-automerge-failed",
         automerge_error: enabled.reason,
         issue_update: issueUpdate,
-        checks: checksSummary(pull.statusCheckRollup)
+        checks: checksSummary(pull.statusCheckRollup),
+        ...codexReviewLedgerGap(codexReview)
       };
     }
 
@@ -256,8 +308,9 @@ export async function considerPullRequest(repository, pull) {
       action: "merge",
       sha: merged.sha,
       base: pull.baseRefName,
-      fallback_from_automerge: enabled.reason,
-      checks: checksSummary(mergeGate.statusCheckRollup)
+      direct_merge_reason: enabled.reason,
+      checks: checksSummary(mergeGate.statusCheckRollup),
+      ...codexReviewLedgerGap(codexReview)
     };
   }
 
@@ -269,7 +322,80 @@ export async function considerPullRequest(repository, pull) {
     action: "merge",
     sha: merged.sha,
     base: pull.baseRefName,
-    checks: checksSummary(mergeGate.statusCheckRollup)
+    checks: checksSummary(mergeGate.statusCheckRollup),
+    ...codexReviewLedgerGap(codexReview)
+  };
+}
+
+async function codexReviewProvisioning(repository, pull) {
+  if (hasCodexReviewContext(pull.statusCheckRollup)) {
+    return { required: true, source: "reported-check" };
+  }
+
+  if (await managedConfigDeclaresCodexReview(repository, pull.baseRefName)) {
+    return { required: true, source: "managed-config" };
+  }
+
+  const message = [
+    `DarkFactory sweep warning ${repoName(repository)}#${pull.number}:`,
+    `${CODEX_REVIEW_REQUIRED_CONTEXT} context is absent and managed config does not declare .github/workflows/codex-review.yml;`,
+    "falling back to branch-protection checks only."
+  ].join(" ");
+  console.warn(message);
+  return {
+    required: false,
+    source: "not-provisioned",
+    warning: "codex-review-not-provisioned",
+    message
+  };
+}
+
+function hasCodexReviewContext(statusCheckRollup) {
+  if (!Array.isArray(statusCheckRollup)) return false;
+  return statusCheckRollup.some((check) => {
+    const name = checkContextName(check).trim().toLowerCase();
+    return name === CODEX_REVIEW_REQUIRED_CONTEXT.toLowerCase();
+  });
+}
+
+async function managedConfigDeclaresCodexReview(repository, ref) {
+  const content = await getOptionalFileContent(gh, repository, ".darkfactory/managed-repository.json", ref);
+  if (!content) return false;
+
+  try {
+    const config = JSON.parse(content);
+    return managedConfigPaths(config).some((filePath) => filePath === ".github/workflows/codex-review.yml");
+  } catch (error) {
+    console.warn(`DarkFactory sweep warning ${repoName(repository)}: invalid .darkfactory/managed-repository.json: ${error.message || String(error)}`);
+    return false;
+  }
+}
+
+function managedConfigPaths(config) {
+  const paths = [];
+  for (const key of ["requiredFiles", "managedFiles", "installedFiles", "workflows"]) {
+    if (!Array.isArray(config?.[key])) continue;
+    for (const item of config[key]) {
+      if (typeof item === "string") paths.push(item);
+      else if (typeof item?.path === "string") paths.push(item.path);
+    }
+  }
+  return paths.map((filePath) => filePath.trim().replace(/^\/+/, ""));
+}
+
+function checkContextName(check) {
+  if (check.__typename === "CheckRun") return check.name || "";
+  if (check.__typename === "StatusContext") return check.context || "";
+  return "";
+}
+
+function codexReviewLedgerGap(codexReview) {
+  if (codexReview.warning !== "codex-review-not-provisioned") return {};
+  return {
+    codex_review_gap: {
+      warning: codexReview.warning,
+      message: codexReview.message
+    }
   };
 }
 
@@ -404,7 +530,7 @@ async function closeIssuesIfDevMerge(repository, pull) {
       continue;
     }
     await gh.request("POST", `/repos/${repoName(repository)}/issues/${issue_number}/comments`, {
-      body: `merged to dev in ${pull.url}; releases with the next dev→main PR`
+      body: `merged to dev in ${pull.url}, enters canonical main through the next Agent OS integration PR`
     });
     await gh.request("PATCH", `/repos/${repoName(repository)}/issues/${issue_number}`, { state: "closed" });
     closed.push(issue_number);

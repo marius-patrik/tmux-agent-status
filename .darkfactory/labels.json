@@ -44,17 +44,17 @@
     {
       "name": "df:class:mechanical",
       "color": "C5DEF5",
-      "description": "Mechanical worker task; use low reasoning effort"
+      "description": "Mechanical worker task with a narrow deterministic surface"
     },
     {
       "name": "df:class:standard",
       "color": "BFDADC",
-      "description": "Standard worker task; use medium reasoning effort"
+      "description": "Standard worker task with normal implementation complexity"
     },
     {
       "name": "df:class:hard",
       "color": "D4C5F9",
-      "description": "Hard worker task; use high reasoning effort"
+      "description": "Hard worker task with substantial implementation complexity"
     },
     {
       "name": "df:ask-owner",

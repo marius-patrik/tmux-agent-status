@@ -36,6 +36,13 @@ jobs:
           persist-credentials: false
           path: pr-workspace
 
+      - name: Pin trusted review base
+        env:
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git -C pr-workspace cat-file -e "${REVIEW_BASE_SHA}^{commit}"
+          git -C pr-workspace update-ref refs/review/base "${REVIEW_BASE_SHA}"
+
       - name: Prepare review context
         uses: actions/github-script@v7
         with:
@@ -48,10 +55,6 @@ jobs:
             const contextFiles = [
               "AGENTS.md",
               ".agents/AGENTS.md",
-              ".agents/.global/AGENT_PROTOCOL.md",
-              ".agents/.global/WORKFLOW.md",
-              ".agents/.global/VALIDATION.md",
-              ".agents/.global/DOCS_AND_MEMORY.md",
               ".agents/.project/AGENTS.md",
               ".agents/.project/PROJECT.md",
               ".agents/.project/COMMANDS.md",
@@ -130,7 +133,7 @@ jobs:
             -e CODEX_HOME=/codex-home \
             -e HOME=/codex-home \
             -e BASE_BRANCH \
-            -e BASE_REF=origin/${BASE_BRANCH} \
+            -e BASE_REF=refs/review/base \
             -e REVIEW_OUTPUT=codex-review.json \
             -e CODEX_REVIEW_MODEL \
             -e CODEX_REVIEW_EFFORT \

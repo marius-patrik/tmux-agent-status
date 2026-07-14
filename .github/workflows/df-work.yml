@@ -15,6 +15,14 @@ on:
         description: Target repository base branch for regenerated work.
         required: false
         type: string
+      resume_pr:
+        description: Optional open PR number to resume (reuses branch, no new PR).
+        required: false
+        type: string
+      resume_branch:
+        description: Optional pushed branch to resume when no PR exists yet.
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -26,33 +34,35 @@ concurrency:
 jobs:
   df-work:
     name: Run DarkFactory worker
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, df-local]
     if: >-
       ${{
-        github.repository == 'marius-patrik/agent-darkfactory' &&
+        github.repository == 'marius-patrik/DarkFactory' &&
         github.event_name == 'workflow_dispatch'
       }}
     permissions:
       contents: write
       issues: write
       pull-requests: write
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
       - name: Validate trusted control ref
-        shell: bash
         run: |
           # Privileged workers receive Codex auth, so they only run in the allowed
           # owner. The job-level guard restricts execution to the control
           # repository; workflow_dispatch may still target another repo by input.
-          if [[ "${GITHUB_REPOSITORY_OWNER}" != "marius-patrik" ]]; then
-            echo "::error::DarkFactory worker can only run in the marius-patrik owner."
+          if ($env:GITHUB_REPOSITORY_OWNER -ne "marius-patrik") {
+            Write-Output "::error::DarkFactory worker can only run in the marius-patrik owner."
             exit 1
-          fi
+          }
 
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${GITHUB_REF:-}" != "refs/heads/main" ]]; then
-            echo "::error::DarkFactory worker workflow_dispatch can only run from refs/heads/main."
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and $env:GITHUB_REF -ne "refs/heads/main") {
+            Write-Output "::error::DarkFactory worker workflow_dispatch can only run from refs/heads/main."
             exit 1
-          fi
+          }
 
       - name: Checkout installed DarkFactory worker
         uses: actions/checkout@v4
@@ -60,6 +70,29 @@ jobs:
           ref: ${{ github.sha }}
           path: darkfactory-control
           persist-credentials: false
+
+      - name: Verify canonical Agent OS
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:AGENTS_HOME)) {
+            Write-Output "::error::AGENTS_HOME is required for the canonical Agent OS launcher."
+            exit 1
+          }
+
+          if (-not [System.IO.Path]::IsPathFullyQualified($env:AGENTS_HOME)) {
+            Write-Output "::error::AGENTS_HOME must be an absolute path."
+            exit 1
+          }
+
+          $agentsLauncher = Join-Path -Path $env:AGENTS_HOME -ChildPath "bin\agents.ps1"
+          if (-not (Test-Path -LiteralPath $agentsLauncher -PathType Leaf)) {
+            Write-Output "::error::Canonical Agent OS launcher is missing at $agentsLauncher."
+            exit 1
+          }
+
+          pwsh -NoLogo -NoProfile -File $agentsLauncher state doctor --json
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
       - name: Mint mp-agents installation token
         id: app-token
@@ -78,11 +111,30 @@ jobs:
       - name: Run worker
         env:
           DARK_FACTORY_TOKEN: ${{ steps.app-token.outputs.token }}
-          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
-          DF_CONTROL_REPO: marius-patrik/agent-darkfactory
+          DF_CONTROL_REPO: marius-patrik/DarkFactory
           DF_TARGET_REPO: ${{ inputs.repo }}
           DF_TARGET_ISSUE_NUMBER: ${{ inputs.issue_number }}
           DF_TARGET_BASE_REF: ${{ inputs.base_ref }}
+          DF_RESUME_PR: ${{ inputs.resume_pr }}
+          DF_RESUME_BRANCH: ${{ inputs.resume_branch }}
           DF_TRIGGER: ${{ github.event_name }}
-          DF_DATA_REPO: marius-patrik/darkfactory-data
         run: node darkfactory-control/.github/scripts/df-work.mjs
+
+      - name: Record verification target
+        env:
+          DF_TARGET_REPO: ${{ inputs.repo }}
+          DF_TARGET_ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          New-Item -ItemType Directory -Path .darkfactory-verification -Force | Out-Null
+          node -e 'const fs=require("node:fs"); const issue=Number(process.env.DF_TARGET_ISSUE_NUMBER); if (!Number.isInteger(issue) || issue <= 0) throw new Error("invalid issue number"); fs.writeFileSync(".darkfactory-verification/target.json", JSON.stringify({repo:process.env.DF_TARGET_REPO,issue_number:issue})+"\n")'
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload verification target
+        uses: actions/upload-artifact@v4
+        with:
+          name: df-verification-target
+          path: .darkfactory-verification/target.json
+          if-no-files-found: error
+          retention-days: 1
